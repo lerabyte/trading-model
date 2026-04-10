@@ -12,19 +12,13 @@ More updates coming as the model develops.
 - Structured dataset with OHLCV features
 - Built a repeatable data pipeline
 
-### Episode 3 — System Design
+### Episode 3 — System Design and Scaffolding
 - Defined the model pipeline and data flow
 - Designed how inputs → model → outputs will work
 - No code yet — focusing on methodology first
 
-## Progress
-
-### Episode 2 — Data Pipeline
-- Pulled historical SPY market data using Python (yfinance)
-- Structured dataset with OHLCV features
-- Built a repeatable data pipeline
-
-### Episode 3 — System Design
-- Defined the model pipeline and data flow
-- Designed how inputs → model → outputs will work
-- No code yet — focusing on methodology first
+## Coming Next
+- Feature engineering
+- Model training
+- Signal generation
+- Full trading pipeline

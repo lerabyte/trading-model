@@ -1,0 +1,26 @@
+import yfinance as yf
+import pandas as pd
+
+# Download daily SPY data
+spy = yf.download("SPY", start="2000-01-01", interval="1d", auto_adjust=False)
+
+# Flatten columns if needed
+if isinstance(spy.columns, pd.MultiIndex):
+    spy.columns = [c[0] for c in spy.columns]
+
+# Reset index so Date becomes a normal column
+spy = spy.reset_index()
+
+# Rename columns to our standard format
+spy.columns = [str(c).lower().replace(" ", "_") for c in spy.columns]
+
+# Keep only the columns we need
+spy = spy[["date", "open", "high", "low", "close", "volume"]]
+
+# Save to CSV
+spy.to_csv("spy_daily.csv", index=False)
+
+print("Saved spy_daily.csv")
+print(spy.head())
+print(spy.tail())
+print(spy.shape)

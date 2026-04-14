@@ -25,3 +25,80 @@ print("Saved spy_daily.csv")
 print(spy.head())
 print(spy.tail())
 print(spy.shape)
+
+
+import numpy as np
+import pandas as pd
+
+def wilder_avg(series: pd.Series, n: int) -> pd.Series:
+    out = pd.Series(np.nan, index=series.index, dtype=float)
+    if len(series) < n:
+        return out
+    out.iloc[n - 1] = series.iloc[:n].mean()
+    alpha = 1.0 / n
+    for i in range(n, len(series)):
+        out.iloc[i] = out.iloc[i - 1] + alpha * (series.iloc[i] - out.iloc[i - 1])
+    return out
+
+def compute_rsi(close: pd.Series, n: int = 14) -> pd.Series:
+    delta = close.diff()
+    gain = wilder_avg(delta.clip(lower=0).fillna(0), n)
+    loss = wilder_avg((-delta.clip(upper=0)).fillna(0), n)
+    rs = gain / loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[(gain == 0) & (loss == 0)] = 50.0
+    rsi[(gain > 0) & (loss == 0)] = 100.0
+    return rsi
+
+def compute_atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
+    prev = df["close"].shift(1)
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev).abs(),
+        (df["low"] - prev).abs(),
+    ], axis=1).max(axis=1)
+    return wilder_avg(tr, n)
+
+close = df["close"]
+
+# Returns
+for n in [1, 2, 3, 5, 10, 20]:
+    df[f"ret{n}"] = close.pct_change(n)
+
+# Moving-average gaps
+for n in [10, 20, 50, 200]:
+    ma = close.rolling(n).mean()
+    df[f"sma{n}_gap"] = (close / ma) - 1
+
+# Moving-average relationships
+df["sma10_sma20_gap"] = (close.rolling(10).mean() / close.rolling(20).mean()) - 1
+df["sma20_sma50_gap"] = (close.rolling(20).mean() / close.rolling(50).mean()) - 1
+df["sma50_sma200_gap"] = (close.rolling(50).mean() / close.rolling(200).mean()) - 1
+
+# Volatility
+for n in [5, 10, 20]:
+    df[f"vol{n}"] = df["ret1"].rolling(n).std()
+df["vol_ratio"] = df["vol5"] / df["vol20"]
+
+# ATR ratio
+df["atr14_ratio"] = compute_atr(df, 14) / close
+
+# RSI
+df["rsi14"] = compute_rsi(close, 14)
+
+# Volume z-score
+df["volume_z20"] = (
+    (df["volume"] - df["volume"].rolling(20).mean()) /
+    df["volume"].rolling(20).std()
+)
+
+# Regime filter
+df["regime_long_ok"] = (close > close.rolling(200).mean()).astype(int)
+
+# Position within recent 20-day range
+df["hl_position_20"] = (
+    (close - df["low"].rolling(20).min()) /
+    (df["high"].rolling(20).max() - df["low"].rolling(20).min() + 1e-9)
+)
+
+print("Features computed.")

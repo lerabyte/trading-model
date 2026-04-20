@@ -59,7 +59,3 @@ The model is not yet deployed or fully integrated into a trading workflow.
 - Converting model output into actionable signals  
 - Backtesting the system  
 - Connecting the model to a paper trading environment (Thinkorswim)  
-
----
-
-## Repository Structure (current)

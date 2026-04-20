@@ -1,39 +1,46 @@
-# Let's get some data!
-import yfinance as yf
-import pandas as pd
+"""
+IMPROVED SPY SIGNAL MODEL
+===========================
+Drop this into a new cell (or replace your existing model cells).
 
-# Download daily SPY data
-spy = yf.download("SPY", start="2000-01-01", interval="1d", auto_adjust=False)
-
-# Flatten columns if needed
-if isinstance(spy.columns, pd.MultiIndex):
-    spy.columns = [c[0] for c in spy.columns]
-
-# Reset index so Date becomes a normal column
-spy = spy.reset_index()
-
-# Rename columns to our standard format
-spy.columns = [str(c).lower().replace(" ", "_") for c in spy.columns]
-
-# Keep only the columns we need
-spy = spy[["date", "open", "high", "low", "close", "volume"]]
-
-# Save to CSV
-spy.to_csv("spy_daily.csv", index=False)
-
-print("Saved spy_daily.csv")
-print(spy.head())
-print(spy.tail())
-print(spy.shape)
-
+Key upgrades vs your current notebook:
+  1. Target = 3-day forward return with a +/-0.4% hurdle (skip the noise)
+  2. HistGradientBoostingClassifier (nonlinear, robust, no scaling needed)
+  3. Chronological train / val / test split (no lookahead)
+  4. Isotonic calibration on val set
+  5. Evaluation = precision by confidence bucket (the metric that matters)
+  6. Signal filter = only fire when calibrated prob >= 0.60
+"""
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings("ignore")
 
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import (
+    accuracy_score, roc_auc_score, brier_score_loss, classification_report
+)
+
+
+# ─────────────────────────────────────────────
+# 1. LOAD DATA
+#    Assumes spy_daily.csv exists (your Cell 1 creates it)
+# ─────────────────────────────────────────────
+df = pd.read_csv("spy_daily.csv")
+df.columns = [c.strip().lower() for c in df.columns]
+df["date"] = pd.to_datetime(df["date"])
+df = df.sort_values("date").reset_index(drop=True)
+print(f"Loaded {len(df)} rows  |  {df['date'].min().date()} → {df['date'].max().date()}")
+
+
+# ─────────────────────────────────────────────
+# 2. FEATURE ENGINEERING
+# ─────────────────────────────────────────────
 def wilder_avg(series: pd.Series, n: int) -> pd.Series:
-    out = pd.Series(np.nan, index=series.index, dtype=float)
-    if len(series) < n:
-        return out
+    out = pd.Series(np.nan, index=series.index)
     out.iloc[n - 1] = series.iloc[:n].mean()
     alpha = 1.0 / n
     for i in range(n, len(series)):
@@ -55,7 +62,7 @@ def compute_atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
     tr = pd.concat([
         df["high"] - df["low"],
         (df["high"] - prev).abs(),
-        (df["low"] - prev).abs(),
+        (df["low"]  - prev).abs(),
     ], axis=1).max(axis=1)
     return wilder_avg(tr, n)
 
@@ -65,14 +72,13 @@ close = df["close"]
 for n in [1, 2, 3, 5, 10, 20]:
     df[f"ret{n}"] = close.pct_change(n)
 
-# Moving-average gaps
+# MA gaps
 for n in [10, 20, 50, 200]:
     ma = close.rolling(n).mean()
     df[f"sma{n}_gap"] = (close / ma) - 1
 
-# Moving-average relationships
-df["sma10_sma20_gap"] = (close.rolling(10).mean() / close.rolling(20).mean()) - 1
-df["sma20_sma50_gap"] = (close.rolling(20).mean() / close.rolling(50).mean()) - 1
+df["sma10_sma20_gap"]  = (close.rolling(10).mean() / close.rolling(20).mean()) - 1
+df["sma20_sma50_gap"]  = (close.rolling(20).mean() / close.rolling(50).mean()) - 1
 df["sma50_sma200_gap"] = (close.rolling(50).mean() / close.rolling(200).mean()) - 1
 
 # Volatility
@@ -89,16 +95,116 @@ df["rsi14"] = compute_rsi(close, 14)
 # Volume z-score
 df["volume_z20"] = (
     (df["volume"] - df["volume"].rolling(20).mean()) /
-    df["volume"].rolling(20).std()
+     df["volume"].rolling(20).std()
 )
 
-# Regime filter
+# Regime gate: price above 200-day MA
 df["regime_long_ok"] = (close > close.rolling(200).mean()).astype(int)
 
-# Position within recent 20-day range
+# High / low position in recent range
 df["hl_position_20"] = (
     (close - df["low"].rolling(20).min()) /
     (df["high"].rolling(20).max() - df["low"].rolling(20).min() + 1e-9)
 )
 
 print("Features computed.")
+
+
+# ─────────────────────────────────────────────
+# 3. TARGET — 3-day forward return with hurdle
+#    +1 = meaningful UP move (>+0.4% in 3 days)
+#     0 = noise / ambiguous
+#    -1 = meaningful DOWN move (<-0.4% in 3 days)
+#    We'll train a BINARY model: is this a BUY signal?
+#    (You can mirror for SHORT signals later)
+# ─────────────────────────────────────────────
+
+
+HURDLE = 0.004   # 0.4%
+FWD    = 3       # trading days forward
+
+df["fwd_ret"] = close.shift(-FWD) / close - 1
+
+df["signal"] = 0
+df.loc[df["fwd_ret"] >  HURDLE, "signal"] =  1   # strong up
+df.loc[df["fwd_ret"] < -HURDLE, "signal"] = -1   # strong down
+
+# For the BUY model: 1 = good long setup, 0 = not (includes noisy days + down days)
+df["target_long"] = (df["signal"] == 1).astype(int)
+
+signal_counts = df["signal"].value_counts().sort_index()
+print(f"\nTarget distribution (hurdle={HURDLE*100:.1f}%, fwd={FWD}d):")
+print(f"  Strong UP  (+1): {signal_counts.get(1,0):>5}  ({signal_counts.get(1,0)/len(df)*100:.1f}%)")
+print(f"  Noise       (0): {signal_counts.get(0,0):>5}  ({signal_counts.get(0,0)/len(df)*100:.1f}%)")
+print(f"  Strong DOWN(-1): {signal_counts.get(-1,0):>5}  ({signal_counts.get(-1,0)/len(df)*100:.1f}%)")
+
+
+# ─────────────────────────────────────────────
+# 4. FEATURE LIST & CLEAN
+# ─────────────────────────────────────────────
+FEATURES = [
+    "ret1", "ret2", "ret3", "ret5", "ret10", "ret20",
+    "sma10_gap", "sma20_gap", "sma50_gap", "sma200_gap",
+    "sma10_sma20_gap", "sma20_sma50_gap", "sma50_sma200_gap",
+    "vol5", "vol10", "vol20", "vol_ratio",
+    "atr14_ratio",
+    "rsi14",
+    "volume_z20",
+    "regime_long_ok",
+    "hl_position_20",
+]
+
+df_clean = df.dropna(subset=FEATURES + ["target_long", "fwd_ret"]).copy()
+df_clean = df_clean.iloc[:-FWD]   # drop last N rows — no future data yet
+print(f"\nClean rows: {len(df_clean)}")
+
+
+# ─────────────────────────────────────────────
+# 5. CHRONOLOGICAL TRAIN / VAL / TEST SPLIT
+#    Train: first 70%  |  Val: next 15%  |  Test: last 15%
+#    NEVER shuffle time-series data.
+# ─────────────────────────────────────────────
+n = len(df_clean)
+train_end = int(n * 0.70)
+val_end   = int(n * 0.85)
+
+train = df_clean.iloc[:train_end]
+val   = df_clean.iloc[train_end:val_end]
+test  = df_clean.iloc[val_end:]
+
+X_train = train[FEATURES].values
+y_train = train["target_long"].values
+
+X_val = val[FEATURES].values
+y_val = val["target_long"].values
+
+X_test = test[FEATURES].values
+y_test = test["target_long"].values
+
+print(f"\nSplit sizes  →  Train: {len(train)}  |  Val: {len(val)}  |  Test: {len(test)}")
+print(f"Train period: {train['date'].min().date()} → {train['date'].max().date()}")
+print(f"Val   period: {val['date'].min().date()}   → {val['date'].max().date()}")
+print(f"Test  period: {test['date'].min().date()}  → {test['date'].max().date()}")
+
+
+# ─────────────────────────────────────────────
+# 6. TRAIN MODEL
+#    HistGradientBoosting: handles nonlinearity,
+#    no scaling needed, fast, regularized by default
+# ─────────────────────────────────────────────
+model = HistGradientBoostingClassifier(
+    max_iter=400,
+    max_depth=4,
+    learning_rate=0.05,
+    min_samples_leaf=40,   # prevents overfit on small regimes
+    l2_regularization=0.1,
+    random_state=42,
+)
+model.fit(X_train, y_train)
+
+raw_val_probs  = model.predict_proba(X_val)[:, 1]
+raw_test_probs = model.predict_proba(X_test)[:, 1]
+
+val_auc = roc_auc_score(y_val, raw_val_probs)
+print(f"\nRaw model  |  Val AUC: {val_auc:.4f}")
+

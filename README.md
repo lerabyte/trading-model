@@ -181,7 +181,3 @@ This is the first completed version of the project, so there are still limitatio
 * The model may not generalize to different market regimes without further testing
 
 Disclaimer: This project is for educational and research purposes only. It is not financial advice, investment advice, or a recommendation to buy or sell any security. The model is experimental and should not be used for real trading without extensive validation, risk controls, and out-of-sample testing.
-
-```
-```
-
